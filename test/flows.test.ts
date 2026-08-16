@@ -1,0 +1,312 @@
+/**
+ * 流程测试：真 Chromium × 本地假站，不碰真站，CI 可跑。
+ *
+ * 这是没有真账号时唯一能验证「机制真的работает」的手段 —— 断言的是
+ * **页面实际收到了什么**（标题文本、编辑器 HTML、filechooser 拿到的文件、
+ * 勾选状态），而不是我们调了哪些函数。
+ */
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+import { loadConfig, type Config } from '../src/config.js';
+import { silentLogger } from '../src/logger.js';
+import { isToutiaoError } from '../src/errors.js';
+import { BrowserManager } from '../src/core/browser.js';
+import { setHumanizeEnabled } from '../src/core/humanize.js';
+import { SessionManager } from '../src/core/session.js';
+import { publishArticle } from '../src/flows/article.js';
+import { publishWeitoutiao } from '../src/flows/weitoutiao.js';
+import { startFakeSite, type FakeSite } from './fake-site/server.js';
+
+/** 1×1 PNG，够用来验证「文件真的被传进去了」 */
+const PNG_1PX = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+let site: FakeSite;
+let dataDir: string;
+let browser: BrowserManager;
+let deps: { browser: BrowserManager; session: SessionManager; config: Config; logger: ReturnType<typeof silentLogger> };
+let imageA: string;
+let imageB: string;
+
+async function boot(options: Parameters<typeof startFakeSite>[0] = {}): Promise<void> {
+  site = await startFakeSite(options);
+  dataDir = mkdtempSync(join(tmpdir(), 'toutiao-mcp-test-'));
+  imageA = join(dataDir, 'a.png');
+  imageB = join(dataDir, 'b.png');
+  writeFileSync(imageA, PNG_1PX);
+  writeFileSync(imageB, PNG_1PX);
+
+  const config: Config = {
+    ...loadConfig({}),
+    baseUrl: site.origin,
+    dataDir,
+    headless: true,
+    // 测试里不要等 10 分钟才回收，也不要因为空闲回收把测试中的浏览器关掉
+    idleTimeoutMs: 60_000,
+    humanize: false, // 假站没有风控，停顿纯属浪费；生产别关
+  };
+  setHumanizeEnabled(config.humanize);
+  const logger = silentLogger();
+  browser = new BrowserManager(config, logger);
+  deps = { browser, session: new SessionManager(browser, config, logger), config, logger };
+}
+
+afterEach(async () => {
+  await browser?.shutdown();
+  await site?.close();
+  if (dataDir) rmSync(dataDir, { recursive: true, force: true });
+});
+
+describe('publish_article', () => {
+  beforeEach(async () => {
+    await boot();
+  });
+
+  it('fills title + rich-text body and completes the publish click chain', async () => {
+    const result = await publishArticle(deps, {
+      title: '这是一个测试标题',
+      content: '## 小节\n\n正文**加粗**内容。\n\n- 项目一\n- 项目二',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe('published');
+    // 第一层判定：从发布接口响应里拿到了 item_id 与 url
+    expect(result.verified).toBe(true);
+    expect(result.itemId).toBe('7412345678901234567');
+    expect(result.url).toContain('toutiao.com/item/');
+
+    expect(site.state.title).toBe('这是一个测试标题');
+    // 粘贴走的是 text/html → 编辑器里应该是真结构，而不是 "## 小节" 这样的字面量
+    expect(site.state.bodyHtml).toContain('<h2');
+    expect(site.state.bodyHtml).toContain('<strong>加粗</strong>');
+    expect(site.state.bodyHtml).toContain('<li>');
+    expect(site.state.bodyText).not.toContain('##');
+    expect(site.state.publishClicked).toBe(true);
+  });
+
+  it('unchecks 「同时发布微头条」 by default so one call publishes exactly one thing', async () => {
+    expect(site.state.alsoWeitoutiaoChecked).toBe(true); // 平台默认勾选
+
+    await publishArticle(deps, { title: '默认取消微头条', content: '正文' });
+
+    expect(site.state.alsoWeitoutiaoChecked).toBe(false);
+  });
+
+  it('keeps 「同时发布微头条」 when the caller explicitly asks for it', async () => {
+    await publishArticle(deps, {
+      title: '显式要微头条',
+      content: '正文',
+      also_weitoutiao: true,
+    });
+
+    expect(site.state.alsoWeitoutiaoChecked).toBe(true);
+  });
+
+  it('uploads the cover through the drawer file chooser', async () => {
+    const result = await publishArticle(deps, {
+      title: '带封面的文章',
+      content: '正文',
+      cover: [imageA],
+    });
+
+    expect(result.cover).toEqual({ uploaded: 1, mode: 'single' });
+    expect(site.state.coverFiles).toEqual(['a.png']);
+  });
+
+  it('checks 首发 and 声明 when asked', async () => {
+    await publishArticle(deps, {
+      title: '带声明的文章',
+      content: '正文',
+      first_publish: true,
+      declarations: ['引用AI'],
+    });
+
+    expect(site.state.firstPublishChecked).toBe(true);
+    expect(site.state.declarations).toContain('引用AI');
+  });
+
+  it('draft mode fills content but never clicks publish', async () => {
+    const result = await publishArticle(deps, {
+      title: '草稿标题不发布',
+      content: '正文内容',
+      draft: true,
+    });
+
+    expect(result.action).toBe('draft_saved');
+    expect(site.state.bodyText).toContain('正文内容');
+    expect(site.state.publishClicked).toBe(false);
+  });
+
+  it('rejects an over-long title before opening the browser — no silent truncation', async () => {
+    const before = browser.isRunning;
+    await expect(
+      publishArticle(deps, { title: '标'.repeat(31), content: '正文' }),
+    ).rejects.toMatchObject({ code: 'CONTENT_LIMIT' });
+    // 校验发生在开浏览器之前
+    expect(browser.isRunning).toBe(before);
+  });
+
+  it('rejects relative image paths (the cwd of this service is invisible to callers)', async () => {
+    await expect(
+      publishArticle(deps, { title: '相对路径应当被拒', content: '正文', images: ['./a.png'] }),
+    ).rejects.toMatchObject({ code: 'BAD_INPUT' });
+  });
+});
+
+describe('publish_article · inline images', () => {
+  it('paste-url: local images are served over a temp URL and the platform transfers them', async () => {
+    await boot({ transferImages: true });
+
+    const result = await publishArticle(deps, {
+      title: '带正文插图的文章',
+      content: `开头\n\n![图一](${imageA})\n\n中间\n\n![图二](${imageB})\n\n结尾`,
+    });
+
+    expect(result.images).toBe(2);
+    expect(result.imageStrategy).toBe('paste-url');
+    // 关键断言：编辑器里的 img 已经是平台 CDN 地址，不再是我们的临时服务地址。
+    // 不校验这一点，就会出现「发布成功但图是外链」——读者比我们先发现。
+    expect(site.state.bodyHtml).toContain('byteimg.com');
+    expect(site.state.bodyHtml).not.toContain('127.0.0.1');
+    expect(site.state.bodyHtml).not.toContain('__TOUTIAO_IMG_');
+  });
+
+  it('falls back when the platform does NOT transfer pasted images', async () => {
+    await boot({ transferImages: false });
+
+    const result = await publishArticle(deps, {
+      title: '不转存时应当回落',
+      content: `正文\n\n![图一](${imageA})`,
+    });
+
+    // auto 策略：paste-url 校验失败 → 换别的路子。不能停在「图是外链」的状态上
+    expect(result.imageStrategy).not.toBe('paste-url');
+    expect(site.state.bodyHtml).not.toContain('127.0.0.1');
+  });
+
+  it('appends images passed only via the images param (never silently drops them)', async () => {
+    await boot({ transferImages: true });
+
+    const result = await publishArticle(deps, {
+      title: '正文没写图但传了图',
+      content: '只有文字的正文',
+      images: [imageA],
+    });
+
+    expect(result.images).toBe(1);
+    expect(site.state.bodyHtml).toContain('byteimg.com');
+  });
+});
+
+describe('publish_article · failures', () => {
+  it('surfaces the platform rejection toast verbatim', async () => {
+    await boot({ failPublish: true });
+
+    const error = await publishArticle(deps, { title: '会被平台拒绝', content: '正文' }).catch(
+      (err: unknown) => err,
+    );
+
+    expect(isToutiaoError(error) && error.code).toBe('PUBLISH_REJECTED');
+    expect(isToutiaoError(error) && error.message).toContain('敏感信息');
+    // 失败必须带现场截图，否则没人知道页面当时是什么样
+    expect(isToutiaoError(error) && typeof error.screenshot).toBe('string');
+  });
+
+  it('reports verified:false (not failure) when the platform gives no confirmation', async () => {
+    await boot({ publishResponse: false });
+
+    const result = await publishArticle(deps, { title: '拿不到确认信息', content: '正文' });
+
+    // 读不到确认 ≠ 失败。报失败会诱导调用方重发，而重复发布更糟
+    expect(result.success).toBe(true);
+    expect(result.verified).toBe(true); // 有成功 toast，属于第三层判定
+    expect(site.state.publishClicked).toBe(true);
+  });
+
+  it('refuses to publish when not logged in', async () => {
+    await boot({ loggedIn: false });
+
+    await expect(publishArticle(deps, { title: '未登录不该发出去', content: '正文' })).rejects.toMatchObject({
+      code: 'NOT_LOGGED_IN',
+    });
+  });
+});
+
+describe('publish_weitoutiao', () => {
+  beforeEach(async () => {
+    await boot();
+  });
+
+  it('types plain text with markdown stripped but keeps #话题', async () => {
+    const result = await publishWeitoutiao(deps, {
+      content: '## 标题会被脱掉\n\n**加粗**也是。聊聊 #人工智能 的进展',
+    });
+
+    expect(result.success).toBe(true);
+    expect(site.state.weitoutiaoText).toContain('标题会被脱掉');
+    expect(site.state.weitoutiaoText).toContain('#人工智能');
+    expect(site.state.weitoutiaoText).not.toContain('##');
+    expect(site.state.weitoutiaoText).not.toContain('**');
+  });
+
+  it('uploads images and clicks 存草稿 in draft mode', async () => {
+    const result = await publishWeitoutiao(deps, {
+      content: '带图的微头条',
+      images: [imageA, imageB],
+      draft: true,
+    });
+
+    expect(result.action).toBe('draft_saved');
+    expect(site.state.weitoutiaoImages).toEqual(['a.png', 'b.png']);
+    expect(site.state.draftClicked).toBe(true);
+    expect(site.state.publishClicked).toBe(false);
+  });
+
+  it('rejects remote image URLs — weitoutiao only takes local files', async () => {
+    await expect(
+      publishWeitoutiao(deps, { content: '正文', images: ['https://example.com/a.png'] }),
+    ).rejects.toMatchObject({ code: 'BAD_INPUT' });
+  });
+
+  it('rejects content over the character limit instead of truncating', async () => {
+    await expect(publishWeitoutiao(deps, { content: '字'.repeat(2001) })).rejects.toMatchObject({
+      code: 'CONTENT_LIMIT',
+    });
+  });
+});
+
+describe('session', () => {
+  it('reports logged-in status with user info', async () => {
+    await boot({ loggedIn: true });
+    const status = await deps.session.checkStatus();
+
+    expect(status.is_logged_in).toBe(true);
+    expect(status.user?.name).toBe('测试头条号');
+  });
+
+  it('reports logged-out and returns a QR image block', async () => {
+    await boot({ loggedIn: false });
+
+    expect((await deps.session.checkStatus()).is_logged_in).toBe(false);
+
+    const qr = await deps.session.getQrcode();
+    expect('alreadyLoggedIn' in qr).toBe(false);
+    if ('alreadyLoggedIn' in qr) return;
+    // 形状必须能被飞燕的 normalizeQrcode 读懂：裸 base64 PNG + 带过期时间的提示文本
+    expect(qr.image.length).toBeGreaterThan(100);
+    expect(Buffer.from(qr.image, 'base64').subarray(1, 4).toString()).toBe('PNG');
+    expect(qr.hint).toContain('扫');
+    expect(new Date(qr.expiresAt).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it('does not hand out a QR code when already logged in', async () => {
+    await boot({ loggedIn: true });
+    const qr = await deps.session.getQrcode();
+    expect('alreadyLoggedIn' in qr).toBe(true);
+  });
+});

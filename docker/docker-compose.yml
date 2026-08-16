@@ -1,0 +1,31 @@
+# toutiao-mcp 独立部署（不接飞燕时用这份）。
+# 接飞燕的话请用飞燕仓库 docker/docker-compose.yml 里的 toutiao profile ——
+# 那边会把 mcp-stage 卷共享给飞燕，配图才交换得过去。
+services:
+  toutiao-mcp:
+    image: ${TOUTIAO_MCP_IMAGE:-moraya/toutiao-mcp}:${TOUTIAO_MCP_VERSION:-latest}
+    container_name: toutiao-mcp
+    restart: unless-stopped
+    # 浏览器会 fork 一堆子进程，没有 init 就会堆僵尸
+    init: true
+    environment:
+      # 不设 = 谁能访问这个端口谁就能用你的头条号发内容
+      AUTH_TOKEN: ${TOUTIAO_MCP_TOKEN:-}
+      TOUTIAO_DATA_DIR: /app/data
+      TOUTIAO_IMAGE_STRATEGY: ${TOUTIAO_IMAGE_STRATEGY:-auto}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      # 登录态（浏览器 profile）。删了要重新扫码 —— 所以 down 时别加 -v
+      - toutiao-data:/app/data
+      # 配图交换目录：调用方把图放进来，用容器内路径 /app/images/... 传给发布工具
+      - toutiao-images:/app/images
+    ports:
+      # 只绑回环：这个服务能以你的身份发内容，不该暴露到局域网
+      - "127.0.0.1:18070:18070"
+    # Chromium 在 /dev/shm 只有 64MB 时会崩。代码里已加 --disable-dev-shm-usage，
+    # 这里再给一点余量，双保险。
+    shm_size: 512mb
+
+volumes:
+  toutiao-data:
+  toutiao-images:

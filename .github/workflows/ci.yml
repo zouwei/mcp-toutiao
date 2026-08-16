@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # 用 corepack 激活 pnpm，避免引入需要 SHA 锁定的第三方 action
+      - name: Enable pnpm via corepack
+        run: corepack enable && corepack prepare pnpm@10.33.2 --activate
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm lint
+      - name: Typecheck
+        run: pnpm check
+      - name: Build
+        run: pnpm build
+      # 镜像 tag 与 playwright 依赖必须同版本，否则容器运行时会去下载浏览器
+      - name: Check Docker base image tag
+        run: node scripts/check-image-tag.mjs
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Test
+        run: pnpm test

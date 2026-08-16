@@ -1,0 +1,22 @@
+# ── 设计文档：内部资料，不随开源仓库分发（README 是唯一公开描述）──
+/docs/
+
+# ── 依赖与构建产物 ──
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+
+# ── 运行时数据：浏览器 profile（含登录态）、截图、临时文件 ──
+/data/
+/images/
+
+# ── 环境 ──
+.env
+.env.*
+!.env.example
+
+# ── 本地工具 ──
+.claude/
+.DS_Store
+*.log
