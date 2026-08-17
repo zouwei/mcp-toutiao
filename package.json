@@ -2,7 +2,7 @@
   "name": "@moraya/toutiao-mcp",
   "version": "0.1.0",
   "description": "今日头条创作者平台 MCP 服务：扫码登录 + 图文文章 / 微头条发布（浏览器自动化，无需官方 API）",
-  "license": "Apache-2.0",
+  "license": "AGPL-3.0-only",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
