@@ -93,12 +93,10 @@ jobs:
       - id: notes
         name: 从 CHANGELOG 提取本版说明
         run: |
-          BODY="$(node -e '
-            const { extractSection } = await import("./scripts/release-notes.mjs");
-            const fs = require("fs");
-            const md = fs.existsSync("CHANGELOG.md") ? fs.readFileSync("CHANGELOG.md","utf8") : "";
-            process.stdout.write(extractSection(md, process.env.GITHUB_REF_NAME));
-          ' --input-type=module || true)"
+          # 走独立脚本而不是内联 node -e：第一版内联写法在 ESM 下用了 require，
+          # 抛错被 `|| true` 吞掉，静默回落成自动记录（v0.1.0 就是这么发出去的）。
+          # 脚本能本地跑、有测试覆盖 —— CI 里的逻辑不该是只有 CI 能执行的。
+          BODY="$(node scripts/changelog-section.mjs "$GITHUB_REF_NAME" || true)"
           if [ -z "$BODY" ]; then
             echo "::warning::CHANGELOG.md 里没有 ${GITHUB_REF_NAME} 那一段，改用自动生成的记录"
             echo "has_notes=false" >> "$GITHUB_OUTPUT"
