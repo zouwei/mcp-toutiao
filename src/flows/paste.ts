@@ -35,6 +35,40 @@ export async function focusEditor(page: Page, step: string): Promise<void> {
 }
 
 /**
+ * 聚焦编辑器并把光标**放到文末**。
+ *
+ * ⚠ 逐张插图时**绝不能**用 `focusEditor`（它是 `editor.click()`，点的是元素正中央）：
+ * 第一张图插进去后，中心位置往往就落在那张图上，而在 ProseMirror 里
+ * **点中图片 = 选中该图片节点**，下一次粘贴会把它整个替换掉。
+ * 2026-08-18 真机：连插 5 张，最后文章里只剩最后一张（run_a6Noq-A_IK）。
+ *
+ * 这里用 Selection API 把光标折叠到内容末尾，不产生任何选区，
+ * 后续粘贴一律是「追加」而不是「替换选中内容」。
+ */
+export async function focusEditorAtEnd(page: Page, step: string): Promise<void> {
+  const editor = page.locator(SELECTORS.editor).first();
+  try {
+    await editor.waitFor({ state: 'visible', timeout: 15_000 });
+  } catch (err) {
+    throw new ToutiaoError(
+      'EDITOR_NOT_FOUND',
+      '找不到正文编辑器 —— 多半是头条前端改版，请升级本服务（selectors.ts）',
+      { step, screenshot: await captureScreenshot(page), cause: err },
+    );
+  }
+  await editor.evaluate((el: HTMLElement) => {
+    el.focus();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(false); // false = 折叠到末尾
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  });
+  await pause(150, 300);
+}
+
+/**
  * 注入 HTML；失败自动降级为逐段打字。
  * @param plain 降级路径用的纯文本（也放进 clipboardData 的 text/plain，供编辑器自己选）
  */

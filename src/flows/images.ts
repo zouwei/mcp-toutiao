@@ -24,7 +24,7 @@ import { SELECTORS, TEXTS } from '../core/selectors.js';
 import { TempFileServer } from '../core/file-server.js';
 import { isRemote } from '../content/validate.js';
 import type { ImageRef } from '../content/markdown.js';
-import { clearEditor, dispatchPaste, editorImageSources, focusEditor } from './paste.js';
+import { clearEditor, dispatchPaste, editorImageSources, focusEditor, focusEditorAtEnd } from './paste.js';
 
 /** 头条自家图片 CDN 的域名特征：src 变成这些就说明已转存 */
 const TOUTIAO_CDN = /(byteimg\.com|pstatp\.com|bytecdn\.cn|toutiaoimg\.com|toutiaocdn\.)/i;
@@ -268,7 +268,8 @@ export async function insertImageViaEditor(page: Page, absolutePath: string): Pr
   const mime = mimeOf(absolutePath);
   const before = (await editorImageSources(page)).length;
 
-  await focusEditor(page, 'paste_file');
+  // 光标必须在文末：点编辑器中央会点中上一张图（= 选中它），这一张就把它替换掉了
+  await focusEditorAtEnd(page, 'paste_file');
   await page.locator(SELECTORS.editor).first().evaluate(
     (el, payload: { data: string; mime: string; name: string }) => {
       const bin = atob(payload.data);

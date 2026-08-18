@@ -362,3 +362,33 @@ describe('session', () => {
     expect('alreadyLoggedIn' in qr).toBe(true);
   });
 });
+
+/**
+ * 2026-08-18 真机 run_a6Noq-A_IK：生成了 5 张配图、MCP 自报 images:5、发布也成功，
+ * 但文章里**只剩最后一张**。
+ * 根因：逐张插图前调的是 `focusEditor`（= 点编辑器正中央），第一张图插进去后
+ * 中心就落在那张图上，点中图片在 ProseMirror 里等于**选中该节点**，
+ * 下一次粘贴把它替换掉 —— 五张依次互相覆盖。
+ * 修法：插图前把光标折叠到文末，永远追加、不产生选区。
+ */
+describe('多图正文（每张都必须留下）', () => {
+  it('连插 3 张图，3 张全在，且顺序与正文一致', async () => {
+    await boot({ transferImages: true });
+
+    const imageC = join(dataDir, 'c.png');
+    writeFileSync(imageC, PNG_1PX);
+
+    const result = await publishArticle(deps, {
+      title: '三张配图的文章',
+      content: `第一段\n\n![图一](${imageA})\n\n第二段\n\n![图二](${imageB})\n\n第三段\n\n![图三](${imageC})`,
+    });
+
+    expect(result.images).toBe(3);
+    // 关键断言：**编辑器里真的有 3 张**。MCP 自报的数字不算数 —— 上次它也报了 5
+    const imgCount = (site.state.bodyHtml.match(/<img/g) ?? []).length;
+    expect(imgCount, `编辑器里只剩 ${imgCount} 张`).toBe(3);
+    // 正文文字也不能被图片替换掉
+    expect(site.state.bodyText).toContain('第一段');
+    expect(site.state.bodyText).toContain('第三段');
+  });
+});

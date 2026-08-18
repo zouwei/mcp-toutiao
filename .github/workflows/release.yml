@@ -1,0 +1,107 @@
+# 打 tag 即发版：校验 → 构建并推送镜像到 GHCR → 建 GitHub Release。
+#
+# 为什么校验和发布放在同一个 workflow 里：分成两个的话，Release 可能先于测试完成而生成，
+# 出现"版本已发布、测试却是红的"。这里 verify 不过就不会推镜像、也不会有 Release。
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# 产出的镜像 tag：
+#   ghcr.io/<owner>/mcp-toutiao:v0.1.0   固定版本（可回滚、可复现）
+#   ghcr.io/<owner>/mcp-toutiao:0.1      同一 minor 内跟随补丁
+#   ghcr.io/<owner>/mcp-toutiao:latest   最新**发行版**
+# 另有 :edge —— 由 ci.yml 在 main 每次推送时更新，代表**最新代码**（未发版）。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # 建 Release
+  packages: write   # 推 GHCR
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Enable pnpm via corepack
+        run: corepack enable && corepack prepare pnpm@10.33.2 --activate
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm check
+      - run: pnpm build
+
+      # tag 与 package.json 必须一致 —— 不一致的话，npx 装到的版本号和镜像 tag
+      # 对不上，排查线上问题时会怀疑人生
+      - name: Tag 与 package.json 版本一致性
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          echo "tag=$TAG package.json=$PKG"
+          [ "$TAG" = "$PKG" ] || { echo "::error::tag v$TAG 与 package.json 的 $PKG 不一致，请先 bump 版本号再打 tag"; exit 1; }
+
+      # 镜像基础 tag 必须与 playwright 依赖同版本，否则容器运行时会去下载浏览器
+      - run: node scripts/check-image-tag.mjs
+      - run: npx playwright install --with-deps chromium
+      - run: pnpm test
+
+  image:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/mcp-toutiao
+          tags: |
+            type=semver,pattern=v{{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      # 只出 amd64：基础镜像是 Playwright（约 3.5GB），arm64 要 QEMU 模拟，
+      # 构建时间会涨到不可接受。有 arm 需求请自行 `bash scripts/build-image.sh`
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 生成变更记录要历史
+      - name: 建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## 镜像
+
+            ```bash
+            docker pull ghcr.io/${{ github.repository_owner }}/mcp-toutiao:${{ github.ref_name }}
+            ```
+
+            | 用途 | tag |
+            |---|---|
+            | 固定这一版（推荐生产） | `${{ github.ref_name }}` |
+            | 最新发行版 | `latest` |
+            | 最新代码（未发版，可能不稳） | `edge` |
+
+            详细变更见下方自动生成的记录；升级注意事项见 [CHANGELOG.md](CHANGELOG.md)。

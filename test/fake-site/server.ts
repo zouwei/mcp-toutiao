@@ -215,7 +215,10 @@ button{margin:4px;padding:6px 12px} .byte-drawer-wrapper{border:2px solid #09f;p
 /* 复选框遮罩：真站用它做自定义样式，副作用是直接点 input 会被拦截 */
 .byte-checkbox{position:relative;display:inline-block}
 .byte-checkbox input{position:absolute;opacity:0;width:16px;height:16px}
-.byte-checkbox-mask{position:absolute;left:0;top:0;width:16px;height:16px;background:#fff;border:1px solid #999}</style>
+.byte-checkbox-mask{position:absolute;left:0;top:0;width:16px;height:16px;background:#fff;border:1px solid #999}
+/* 编辑器里的图按真站那样占一整块 —— 图小得像素点的话，"点中央"永远落在文字上，
+   复现不出「点中图片=选中它，下一次粘贴把它替换掉」这个真机行为 */
+.editor img{display:block;width:90%;height:120px;object-fit:cover;margin:8px 0;background:#ddd}</style>
 </head><body data-page="${page}">${body}
 <script>
   window.__report = (patch) => fetch('/__state', { method: 'POST', body: JSON.stringify(patch) });
@@ -288,6 +291,22 @@ const TRANSFER = ${transfer};
  * 真站上只有这条路拿得到合法的图片 uri；贴外链只是"显示出来"，发布时平台会回
  * code 7115「图片uri非法」（2026-08-18 实测）。
  */
+/**
+ * 照抄 ProseMirror：**点中一张图 = 选中该图片节点**。
+ * 真站正是因为这个，"点编辑器中央再粘贴"会把上一张图替换掉
+ * （2026-08-18 run_a6Noq-A_IK：5 张图只剩最后一张）。
+ * 假站不复刻这条，逐张插图的顺序/覆盖问题就永远测不出来。
+ */
+editor.addEventListener('mousedown', (e) => {
+  if (!(e.target instanceof HTMLImageElement)) return;
+  const range = document.createRange();
+  range.selectNode(e.target);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  e.preventDefault();
+});
+
 editor.addEventListener('paste', async (e) => {
   const files = Array.from((e.clipboardData && e.clipboardData.files) || []);
   if (files.length === 0) return; // 交给下面的 text/html 分支
@@ -299,7 +318,25 @@ editor.addEventListener('paste', async (e) => {
     const { url } = await res.json();
     const img = document.createElement('img');
     img.src = url;
-    editor.appendChild(img);
+    /**
+     * **按当前选区插入**，而不是无脑 appendChild —— 真站就是这个语义：
+     * 有选区就替换选中内容（在 ProseMirror 里点中一张图 = 选中它，
+     * 下一次粘贴会把它换掉），没选区就插在光标处。
+     * 无脑 append 的假站测不出「五张图互相覆盖只剩最后一张」这类问题
+     * （2026-08-18 真机 run_a6Noq-A_IK）。
+     */
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0 && editor.contains(sel.anchorNode)) {
+      const range = sel.getRangeAt(0);
+      range.deleteContents();   // 有选区 = 替换
+      range.insertNode(img);
+      range.setStartAfter(img);
+      range.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } else {
+      editor.appendChild(img);
+    }
   }
   report();
 }, true);

@@ -5,6 +5,9 @@
 
 任意 MCP 客户端都能连（Claude Code、Cursor、n8n、自建 agent），也可作为 Docker 边车接入内容运营系统。
 
+**当前版本 v0.1.0** —— 已在真实头条号上跑通发布（含正文插图与封面）。
+每次发布做了什么、真机验证中修掉了哪些问题，见 [CHANGELOG.md](CHANGELOG.md)。
+
 > ⚠️ **风险须知**：头条没有开放的发布 API，本服务模拟人在网页端操作。这**可能违反平台用户协议**，
 > 账号存在风控甚至封禁的风险。请自行评估，建议先用小号验证。作者不对账号损失负责。
 
@@ -51,10 +54,22 @@ npx -y @moraya/toutiao-mcp login
 ### 方式二：Docker（推荐用于服务器 / 接入自动化系统）
 
 ```bash
-cp .env.example .env      # 至少设一个 AUTH_TOKEN
+docker pull ghcr.io/<owner>/mcp-toutiao:latest    # 最新发行版
+cp .env.example .env                              # 至少设一个 AUTH_TOKEN
 docker compose -f docker/docker-compose.yml up -d
 curl http://127.0.0.1:18070/healthz
 ```
+
+**两条镜像通道，按需选一条**：
+
+| tag | 内容 | 谁该用 |
+|---|---|---|
+| `vX.Y.Z` | 固定某个发行版 | **生产**。可回滚、可复现，升级是你自己的决定 |
+| `latest` | 最新**发行版** | 想自动吃到新版又不想盯 tag |
+| `edge` | main 分支**最新代码**（未发版） | 尝鲜、验证刚提的修复；**可能不稳** |
+
+`edge` 由 main 的每次推送刷新，`latest` / `vX.Y.Z` 只在打 tag 时产生 —— 两者之间的差异
+就是"已合并但还没发版"的部分。
 
 MCP 端点：`http://127.0.0.1:18070/mcp`（streamable-http，带 `Authorization: Bearer <AUTH_TOKEN>`）。
 
@@ -153,12 +168,27 @@ docker logs toutiao-mcp    # 日志一律在 stderr
 
 ---
 
-## 构建镜像
+## 发版
+
+打 tag 就发：CI 先跑 lint / typecheck / 全量测试，**全绿才会**推镜像并建 Release
+（顺序反过来的话，会出现"版本已发布、测试却是红的"）。
+
+```bash
+# 1. 先 bump package.json 的 version（CI 会校验它与 tag 一致，不一致直接失败）
+# 2. 更新 CHANGELOG.md
+git tag v0.1.1 && git push origin v0.1.1
+```
+
+产出：`ghcr.io/<owner>/mcp-toutiao:v0.1.1`、`:0.1`、`:latest`，外加一条 GitHub Release。
+
+## 自己构建镜像
 
 ```bash
 FEIYAN_MCP_REGISTRY_MIRROR=<镜像源主机> NODE_IMAGE=docker.m.daocloud.io/library/node:22-slim \
   bash scripts/build-image.sh
 ```
+
+拉不到 GHCR、需要 arm64、或想跑未提交的本地改动时才需要自己构建。
 
 **别直接 `docker build -t moraya/toutiao-mcp .`**：调用方（如飞雁）配了镜像源时，
 它 inspect 的是**带前缀**的 ref（`<镜像源>/moraya/toutiao-mcp:latest`）。只打裸名 tag 的话
