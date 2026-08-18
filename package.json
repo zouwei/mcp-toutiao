@@ -31,7 +31,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "dev": "tsx src/cli.ts serve",
-    "spike": "tsx scripts/spike.ts"
+    "spike": "tsx scripts/spike.ts",
+    "release:notes": "node scripts/summarize-release.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

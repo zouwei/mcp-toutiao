@@ -87,11 +87,34 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # 生成变更记录要历史
+      # 发行说明在**本地**用 `pnpm release:notes` 起草并写进 CHANGELOG（CI 里没有
+      # Claude 二进制，也不该为发版去管 API key）。这里只做提取；取不到就回落到
+      # GitHub 自动生成的记录 —— 宁可粗糙，也不能因为说明缺失就发不出版本。
+      - id: notes
+        name: 从 CHANGELOG 提取本版说明
+        run: |
+          BODY="$(node -e '
+            const { extractSection } = await import("./scripts/release-notes.mjs");
+            const fs = require("fs");
+            const md = fs.existsSync("CHANGELOG.md") ? fs.readFileSync("CHANGELOG.md","utf8") : "";
+            process.stdout.write(extractSection(md, process.env.GITHUB_REF_NAME));
+          ' --input-type=module || true)"
+          if [ -z "$BODY" ]; then
+            echo "::warning::CHANGELOG.md 里没有 ${GITHUB_REF_NAME} 那一段，改用自动生成的记录"
+            echo "has_notes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_notes=true" >> "$GITHUB_OUTPUT"
+            { echo 'body<<RELEASE_EOF'; echo "$BODY"; echo 'RELEASE_EOF'; } >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 建 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          # 有人写好的说明就用它，没有才让 GitHub 按提交自动生成
+          generate_release_notes: ${{ steps.notes.outputs.has_notes != 'true' }}
           body: |
+            ${{ steps.notes.outputs.body }}
+
             ## 镜像
 
             ```bash
