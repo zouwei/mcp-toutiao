@@ -57,6 +57,35 @@ export const SELECTORS = {
     '[class*="left-menu"]',
   ),
 
+  /**
+   * 头条编辑器右侧的 **AI 助手抽屉**。它不是弹窗、没有遮罩层，而是一块常驻面板，
+   * `byte-drawer-wrapper` 的子树会**盖住「预览并发布」按钮并拦截点击**
+   * （2026-08-17 实测：Playwright 报 `<div class="ai-conversation in-tab-pane"> …
+   * subtree intercepts pointer events`，点击重试到超时）。
+   *
+   * ⚠ 只匹配 ai-* 那几个类名，**不能笼统地关掉所有 drawer** ——
+   * 封面上传走的正是另一个 `byte-drawer-wrapper`（封面抽屉），关掉它封面就传不成了。
+   */
+  aiAssistantDrawer: css('[class*="ai-assistant"]', '[class*="ai-conversation"]'),
+
+  /**
+   * 「同时发布微头条」整行。真站结构（2026-08-17 实测 dump）：
+   *
+   *   <div class="pgc-edit-cell edit-cell form-tuwen_wtt_trans">
+   *     <div class="edit-label">同时发布微头条</div>          ← 左列，点它没有任何作用
+   *     <div class="edit-input"><label class="byte-checkbox …">
+   *        <input type="checkbox" checked>
+   *        <span class="byte-checkbox-inner-text">发布得更多收益</span>
+   *
+   * 两条选择器并列：先认业务类名，再按左列文案兜底（类名改版时还能活）。
+   */
+  weitoutiaoRow: '.pgc-edit-cell.form-tuwen_wtt_trans, .pgc-edit-cell:has(.edit-label:text-is("同时发布微头条"))',
+  /**
+   * 真正可点的目标：`<input>` 被 `.byte-checkbox-mask` 盖着，直接点会被拦截，
+   * 点它外层的 label（或 label 里那句文案）才有效。
+   */
+  weitoutiaoToggle: 'label.byte-checkbox',
+
   /** 登录页二维码。截图对象要尽量小 —— 截整页的话二维码在里面太小，手机扫不出来 */
   loginQrcode: css(
     '[class*="qrcode"] canvas',
@@ -78,6 +107,13 @@ export const SELECTORS = {
   editor: css('[class*="ProseMirror"]', '[contenteditable="true"]'),
 
   /** 封面区域：点它打开上传抽屉 */
+  /**
+   * 「替换」封面。正文里有图时，**头条会拿首图自动填充封面** ——
+   * 这时「添加封面」按钮不存在，页面上是缩略图 + 「编辑 | 替换」
+   * （2026-08-18 实测：不处理这一支，带正文插图的文章会卡在封面步骤超时）。
+   */
+  coverReplaceButton: css('[class*="cover"] [class*="replace"]'),
+
   coverAddButton: css(
     '[class*="cover"] [class*="add"]',
     '[class*="cover"] [class*="upload"]',
@@ -132,10 +168,17 @@ export const TEXTS = {
   weitoutiaoPublishButton: '发布',
   weitoutiaoDraftButton: '存草稿',
   localUpload: '本地上传',
+  /** 封面已存在时的替换入口（正文有图 → 平台自动填充封面） */
+  coverReplace: '替换',
   firstPublish: '头条首发',
   addToCollection: '添加至合集',
-  /** 「同时发布微头条」的实际文案带收益话术，用它旁边这句更稳 */
+  /**
+   * 「同时发布微头条」。真站的结构是**两列**：左列是行标签「同时发布微头条」，
+   * 右列才是复选框 + 文案「发布得更多收益」——点左列那个标签毫无作用。
+   */
   alsoWeitoutiao: ['同时发布微头条', '发布得更多收益'],
+  /** 点得动的那个（复选框旁边的文案） */
+  alsoWeitoutiaoToggle: '发布得更多收益',
   imageEntry: '图片',
   coverModes: { single: '单图', triple: '三图', none: '无封面' },
   /** 作品声明：短名 → 页面上的完整文案 */

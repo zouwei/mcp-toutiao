@@ -11,6 +11,8 @@
  *
  * 校验点是关键：不校验就会得到「发布成功但图是外链」，这类问题读者先于我们发现。
  */
+import { readFileSync } from 'node:fs';
+import { basename } from 'node:path';
 import type { Page } from 'playwright';
 
 import type { ImageStrategy } from '../config.js';
@@ -60,8 +62,24 @@ export async function uploadCover(
     await selectCoverMode(page, effective);
     await pause(400, 800);
 
+    /**
+     * 正文有图时头条会自动填好封面，此时没有「添加封面」按钮，只有「编辑 | 替换」。
+     * 两条路都试：先找添加，找不到就点替换 —— 之后的抽屉流程是同一套。
+     */
     const addButton = page.locator(SELECTORS.coverAddButton).first();
-    await addButton.click({ timeout: 10_000 });
+    const canAdd = await addButton.isVisible({ timeout: 3000 }).catch(() => false);
+    if (canAdd) {
+      await addButton.click({ timeout: 10_000 });
+    } else {
+      const replace = page.locator(SELECTORS.coverReplaceButton).first();
+      const canReplace = await replace.isVisible({ timeout: 2000 }).catch(() => false);
+      if (canReplace) {
+        logger.info('封面已被平台按正文首图自动填充，改走「替换」');
+        await replace.click({ timeout: 10_000 });
+      } else {
+        await page.getByText(TEXTS.coverReplace, { exact: false }).first().click({ timeout: 8000 });
+      }
+    }
     await pause(800, 1500);
 
     // 本地上传按钮触发 filechooser。remote 图这里也要先落地成本地文件 —— 由调用方
@@ -233,25 +251,57 @@ export async function pasteSegmentedWithUploads(
 
 /** 用编辑器的图片入口插入一张本地图（editor-upload 与 intercept-upload 共用） */
 export async function insertImageViaEditor(page: Page, absolutePath: string): Promise<void> {
-  // 优先直接喂 file input：比点按钮少一次 UI 依赖，也不受弹层遮挡影响
-  const input = page.locator(SELECTORS.fileInput).first();
-  if (await input.count().then((n) => n > 0).catch(() => false)) {
-    await input.setInputFiles(absolutePath);
-  } else {
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser', { timeout: 15_000 }),
-      page.locator(SELECTORS.editorImageButton).first().click({ timeout: 10_000 }),
-    ]);
-    await chooser.setFiles(absolutePath);
+  /**
+   * **把图片当"文件"粘贴进编辑器** —— 等价于人按 Ctrl+V 贴一张截图。
+   *
+   * 为什么不是点工具栏的图片按钮：真站（SYL 编辑器）工具栏 24 个按钮**全是无
+   * aria-label / title / tooltip 的 SVG 图标**，认不出哪个是图片；而且页面上
+   * **压根没有 `input[type=file]`**（按需创建），所以「直接喂 file input」和
+   * 「等 filechooser」两条老路都是死的（2026-08-18 实测：filechooser 等满 15s 超时）。
+   *
+   * 为什么不是贴 URL：贴外链图时编辑器只是把它显示出来，img src 甚至会变成头条 CDN
+   * 域名（骗过 src 校验），但发布时平台回 **`{code:7115,"图片uri非法"}`** ——
+   * 整篇发不出去。**只有走平台自己的上传通道拿到的 uri 才是合法的**，
+   * 而粘贴文件会真的打 `POST /spice/image`（实测 200）。
+   */
+  const bytes = readFileSync(absolutePath);
+  const mime = mimeOf(absolutePath);
+  const before = (await editorImageSources(page)).length;
+
+  await focusEditor(page, 'paste_file');
+  await page.locator(SELECTORS.editor).first().evaluate(
+    (el, payload: { data: string; mime: string; name: string }) => {
+      const bin = atob(payload.data);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i += 1) arr[i] = bin.charCodeAt(i);
+      const file = new File([arr], payload.name, { type: payload.mime });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    },
+    { data: bytes.toString('base64'), mime, name: basename(absolutePath) },
+  );
+
+  // 上传是异步的：等编辑器里真的多出一张图，而不是傻等固定秒数
+  for (let i = 0; i < 20; i += 1) {
+    await pause(500, 800);
+    if ((await editorImageSources(page)).length > before) break;
   }
-  await pause(2000, 4000);
 
   // 上传可能有确认弹层，有就点掉；没有也不算错
   const confirm = page.locator(SELECTORS.drawerConfirm).first();
-  if (await confirm.isVisible({ timeout: 3000 }).catch(() => false)) {
+  if (await confirm.isVisible({ timeout: 2000 }).catch(() => false)) {
     await confirm.click().catch(() => {});
     await pause(800, 1500);
   }
+}
+
+function mimeOf(path: string): string {
+  const ext = path.toLowerCase().split('.').pop() ?? '';
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+  if (ext === 'gif') return 'image/gif';
+  if (ext === 'webp') return 'image/webp';
+  return 'image/png';
 }
 
 async function screenshotOf(page: Page): Promise<{ screenshot?: string }> {

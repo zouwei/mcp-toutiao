@@ -153,6 +153,18 @@ docker logs toutiao-mcp    # 日志一律在 stderr
 
 ---
 
+## 构建镜像
+
+```bash
+FEIYAN_MCP_REGISTRY_MIRROR=<镜像源主机> NODE_IMAGE=docker.m.daocloud.io/library/node:22-slim \
+  bash scripts/build-image.sh
+```
+
+**别直接 `docker build -t moraya/toutiao-mcp .`**：调用方（如飞雁）配了镜像源时，
+它 inspect 的是**带前缀**的 ref（`<镜像源>/moraya/toutiao-mcp:latest`）。只打裸名 tag 的话
+构建成功、容器也起得来，**跑的却是上一版镜像** —— 表现为"改了代码没生效"，而日志一切正常。
+脚本会把两个 tag 一起打上，并自检它们指向同一个 image id。
+
 ## 开发
 
 ```bash

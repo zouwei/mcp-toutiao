@@ -15,6 +15,8 @@ export const ERROR_CODES = [
   'IMAGE_UPLOAD_FAILED',
   'CONTENT_LIMIT',
   'PUBLISH_REJECTED',
+  /** 点了发布但拿不到任何「发出去了」的证据 —— 不等于失败，也绝不能当成功 */
+  'PUBLISH_UNCONFIRMED',
   'TIMEOUT',
   'BUSY',
   'BAD_INPUT',

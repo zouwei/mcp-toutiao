@@ -159,7 +159,12 @@ describe('publish_article', () => {
 });
 
 describe('publish_article · inline images', () => {
-  it('paste-url: local images are served over a temp URL and the platform transfers them', async () => {
+  /**
+   * 2026-08-18 真机：本地图**必须经平台自己的上传通道**（粘贴文件），
+   * 贴外链 URL 只是"显示出来"——发布时平台回 code 7115「图片uri非法」，整篇作废。
+   * 所以 auto 有本地图时第一跳就是 editor-upload。
+   */
+  it('本地图走平台上传通道（粘贴文件），而不是贴临时 URL', async () => {
     await boot({ transferImages: true });
 
     const result = await publishArticle(deps, {
@@ -168,7 +173,9 @@ describe('publish_article · inline images', () => {
     });
 
     expect(result.images).toBe(2);
-    expect(result.imageStrategy).toBe('paste-url');
+    expect(result.imageStrategy).toBe('editor-upload');
+    // 判据是"平台真的收到了文件"，不是"src 看起来像 CDN"——后者正是当初的假阳性
+    expect(site.state.inlineFiles).toHaveLength(2);
     // 关键断言：编辑器里的 img 已经是平台 CDN 地址，不再是我们的临时服务地址。
     // 不校验这一点，就会出现「发布成功但图是外链」——读者比我们先发现。
     expect(site.state.bodyHtml).toContain('byteimg.com');
@@ -176,7 +183,7 @@ describe('publish_article · inline images', () => {
     expect(site.state.bodyHtml).not.toContain('__TOUTIAO_IMG_');
   });
 
-  it('falls back when the platform does NOT transfer pasted images', async () => {
+  it('平台不转存外链时也不会把外链留在正文里', async () => {
     await boot({ transferImages: false });
 
     const result = await publishArticle(deps, {
@@ -184,7 +191,7 @@ describe('publish_article · inline images', () => {
       content: `正文\n\n![图一](${imageA})`,
     });
 
-    // auto 策略：paste-url 校验失败 → 换别的路子。不能停在「图是外链」的状态上
+    // 不能停在「图是我们的临时地址」的状态上 —— 发出去读者会看到 404
     expect(result.imageStrategy).not.toBe('paste-url');
     expect(site.state.bodyHtml).not.toContain('127.0.0.1');
   });
@@ -217,15 +224,43 @@ describe('publish_article · failures', () => {
     expect(isToutiaoError(error) && typeof error.screenshot).toBe('string');
   });
 
-  it('reports verified:false (not failure) when the platform gives no confirmation', async () => {
+  it('接口没回 JSON 但有成功 toast → 仍算确认（第三层判定），不报失败', async () => {
     await boot({ publishResponse: false });
 
     const result = await publishArticle(deps, { title: '拿不到确认信息', content: '正文' });
 
-    // 读不到确认 ≠ 失败。报失败会诱导调用方重发，而重复发布更糟
+    // toast/跳转都算证据。有证据就别报失败 —— 报失败会诱导调用方重发，而重复发布更糟
     expect(result.success).toBe(true);
-    expect(result.verified).toBe(true); // 有成功 toast，属于第三层判定
+    expect(result.verified).toBe(true);
     expect(site.state.publishClicked).toBe(true);
+  });
+
+  /**
+   * 2026-08-17 真机事故 run_fG3bGH8OXh：点击被 AI 助手抽屉拦下，
+   * 接口、跳转、toast **一个证据都没有**，而流程返回了
+   * `{success:true, action:'published', verified:false}` —— 飞雁据此把整条工作流
+   * 标成成功，用户去头条后台翻了一圈才发现一条都没发出去。
+   * **零证据必须报错，不能谎报成功。**
+   */
+  it('一个证据都没有时必须抛 PUBLISH_UNCONFIRMED，绝不报成功', async () => {
+    await boot({ silentPublish: true });
+
+    await expect(
+      publishArticle(deps, { title: '零证据发布', content: '正文' }),
+    ).rejects.toMatchObject({ code: 'PUBLISH_UNCONFIRMED' });
+  });
+
+  it('报错要告诉用户先去后台核对，而不是直接重发（重复发布更糟）', async () => {
+    await boot({ silentPublish: true });
+
+    try {
+      await publishArticle(deps, { title: '零证据发布', content: '正文' });
+      expect.unreachable('应当抛错');
+    } catch (err) {
+      const e = err as { code?: string; message?: string };
+      expect(e.code).toBe('PUBLISH_UNCONFIRMED');
+      expect(e.message).toContain('内容管理');
+    }
   });
 
   it('refuses to publish when not logged in', async () => {
@@ -287,6 +322,23 @@ describe('session', () => {
 
     expect(status.is_logged_in).toBe(true);
     expect(status.user?.name).toBe('测试头条号');
+  });
+
+  /**
+   * 2026-08-17 真机事故的回归钉：未登录时头条会**先跳一次 `/profile_v4/` 再弹回登录页**，
+   * 旧实现在中间那一跳就认定「落地了」，于是把未登录报成已登录 —— 用户在飞雁账户页
+   * 看到「已登录」，实际根本没扫码。
+   *
+   * 断言的是「跳转链走完之后才判定」，所以只要 settleOnHome 退回"第一次匹配就返回"，
+   * 这条必然变红。
+   */
+  it('waits out the whole redirect chain — the transient /profile_v4 hop must not read as logged in', async () => {
+    await boot({ loggedIn: false });
+
+    const status = await deps.session.checkStatus();
+    expect(status.is_logged_in).toBe(false);
+    // 顺带确认给用户的话是「去扫码」，而不是一句空洞的 false
+    expect(status.message).toContain('扫码');
   });
 
   it('reports logged-out and returns a QR image block', async () => {

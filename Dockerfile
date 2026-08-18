@@ -7,8 +7,20 @@
 #   不对齐的话运行时会尝试下载浏览器 —— 容器里没网就失败得莫名其妙。
 ARG PLAYWRIGHT_VERSION=1.62.1
 
+# 基础镜像的来源可换。默认是官方地址；在拉不到 Docker Hub 的环境（国内机房/内网）
+# 用 --build-arg 指到可达的镜像源即可，**不必改这份 Dockerfile**：
+#
+#   docker build \
+#     --build-arg NODE_IMAGE=docker.m.daocloud.io/library/node:22-slim \
+#     -t <你的镜像名> .
+#
+# 只参数化「从哪拉」，不参数化版本 —— node 大版本与 playwright 版本是代码约束，
+# 随手改会让 scripts/check-image-tag.mjs 的守卫失去意义。
+ARG NODE_IMAGE=node:22-slim
+ARG PLAYWRIGHT_IMAGE=mcr.microsoft.com/playwright
+
 # ---- build ----
-FROM node:22-slim AS builder
+FROM ${NODE_IMAGE} AS builder
 WORKDIR /src
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
@@ -19,7 +31,7 @@ COPY scripts ./scripts
 RUN pnpm build && pnpm prune --prod
 
 # ---- run ----
-FROM mcr.microsoft.com/playwright:v${PLAYWRIGHT_VERSION}-noble
+FROM ${PLAYWRIGHT_IMAGE}:v${PLAYWRIGHT_VERSION}-noble
 
 ENV TZ=Asia/Shanghai \
     NODE_ENV=production \

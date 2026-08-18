@@ -35,6 +35,11 @@ export interface QrcodeResult {
 /** 二维码大约 50 秒刷新一次（toutiao-ops 实测值），过期时间按此给 */
 const QR_TTL_SEC = 50;
 
+/** 等重定向链落定：轮询间隔 / 判定"停稳"所需的静止时长 / 总超时 */
+const SETTLE_POLL_MS = 250;
+const SETTLE_STABLE_MS = 1_200;
+const SETTLE_TIMEOUT_MS = 15_000;
+
 export class SessionManager {
   private readonly log: Logger;
   private readonly urls: SiteUrls;
@@ -51,20 +56,36 @@ export class SessionManager {
     this.urls = buildUrls(config.baseUrl);
   }
 
-  /** 进入后台首页并等重定向落定 */
+  /**
+   * 进入后台首页并等重定向**彻底停下来**。
+   *
+   * ⚠ 这里曾经用 `waitForURL(落进任一已知路径)`，2026-08-17 真机上把未登录判成了已登录：
+   * 头条未登录的跳转链是三跳 —— `/` → **`/profile_v4/`** → `/auth/page/login`，
+   * 中间那一跳是客户端跳转（dashboard 页面先发下来、再自己弹走），URL 会被真实提交。
+   * 于是「第一次匹配」就命中了 `/profile_v4`，读到的是 dashboard URL，判定已登录。
+   *
+   * 所以判据必须是「URL 不再变化」而不是「URL 第一次匹配」。登录页是终点，
+   * 一旦落到它就可以立刻返回，不必再等稳定窗口。
+   */
   private async settleOnHome(page: Page): Promise<string> {
     await page.goto(this.urls.home, { waitUntil: 'domcontentloaded' });
-    // 头条会做几跳（未登录 → 登录页；已登录 → dashboard）。等到落进任一已知路径为止，
-    // 等不到也不报错 —— 下面按当前 URL + 页面特征判定。
-    await page
-      .waitForURL(
-        (url) => {
-          const s = url.toString();
-          return s.includes(PATHS.dashboard) || s.includes(PATHS.login) || s.includes(PATHS.ssoHost);
-        },
-        { timeout: 15_000 },
-      )
-      .catch(() => {});
+
+    const deadline = Date.now() + SETTLE_TIMEOUT_MS;
+    let last = page.url();
+    let unchangedSince = Date.now();
+
+    while (Date.now() < deadline) {
+      // 登录页不会再跳走 —— 提前返回，省掉一整个稳定窗口的等待
+      if (SessionManager.isLoginUrl(last)) return last;
+      await page.waitForTimeout(SETTLE_POLL_MS);
+      const now = page.url();
+      if (now !== last) {
+        last = now;
+        unchangedSince = Date.now();
+        continue;
+      }
+      if (Date.now() - unchangedSince >= SETTLE_STABLE_MS) return last;
+    }
     return page.url();
   }
 

@@ -71,6 +71,20 @@ export async function dismissOverlays(page: Page, rounds = 3): Promise<number> {
             count++;
           });
 
+        /**
+         * AI 助手抽屉：**没有遮罩层，所以上面那条规则抓不到它**，但它的子树会盖在
+         * 「预览并发布」按钮上拦截点击（2026-08-17 真机：点击重试到超时，文章从未发出，
+         * 而流程还报告了发布成功）。
+         * 只隐藏 ai-* 抽屉 —— 封面上传用的是另一个 drawer，连坐关掉就传不了封面了。
+         */
+        document.querySelectorAll('[class*="ai-assistant"], [class*="ai-conversation"]').forEach((el) => {
+          const host = (el as HTMLElement).closest('[class*="drawer"]') ?? (el as HTMLElement);
+          if ((host as HTMLElement).style.display !== 'none') {
+            (host as HTMLElement).style.display = 'none';
+            count++;
+          }
+        });
+
         return count;
       }, TEXTS.dismiss)
       .catch(() => 0);
@@ -85,9 +99,11 @@ export async function dismissOverlays(page: Page, rounds = 3): Promise<number> {
 }
 
 /** 现场截图：base64 PNG（不带 data: 前缀，MCP image 块要的就是裸 base64） */
-export async function captureScreenshot(page: Page): Promise<string | undefined> {
+export async function captureScreenshot(page: Page, fullPage = false): Promise<string | undefined> {
   try {
-    const buffer = await page.screenshot({ type: 'png', fullPage: false, timeout: 10_000 });
+    // 发布失败要整页：校验提示常出现在标题/正文那一段，视口截图只拍得到表单下半截，
+    // 看了半天什么都发现不了（2026-08-17 排查时连丢两张视口图才想起这事）
+    const buffer = await page.screenshot({ type: 'png', fullPage, timeout: 10_000 });
     return buffer.toString('base64');
   } catch {
     // 截图失败不该盖过真正的错误

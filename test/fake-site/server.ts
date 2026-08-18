@@ -40,7 +40,14 @@ export interface FakeState {
 }
 
 export async function startFakeSite(
-  options: { loggedIn?: boolean; transferImages?: boolean; failPublish?: boolean; publishResponse?: boolean } = {},
+  options: {
+    loggedIn?: boolean;
+    transferImages?: boolean;
+    failPublish?: boolean;
+    publishResponse?: boolean;
+    /** 点了发布**什么反馈都没有**：不回接口、不跳转、不弹 toast（真机被抽屉拦住时就是这样） */
+    silentPublish?: boolean;
+  } = {},
 ): Promise<FakeSite> {
   const state: FakeState = {
     loggedIn: options.loggedIn ?? true,
@@ -62,6 +69,7 @@ export async function startFakeSite(
   const transfer = options.transferImages ?? true;
   const failPublish = options.failPublish ?? false;
   const withResponse = options.publishResponse ?? true;
+  const silent = options.silentPublish ?? false;
 
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -101,7 +109,7 @@ export async function startFakeSite(
       return;
     }
 
-    const page = renderPage(path, { state, transfer, failPublish });
+    const page = renderPage(path, { state, transfer, failPublish, silent });
     if (page === null) {
       res.writeHead(302, { location: '/auth/page/login' }).end();
       return;
@@ -136,17 +144,34 @@ const REDIRECT = (location: string): Redirect => ({ redirect: location });
 
 function renderPage(
   path: string,
-  ctx: { state: FakeState; transfer: boolean; failPublish: boolean },
+  ctx: { state: FakeState; transfer: boolean; failPublish: boolean; silent: boolean },
 ): string | Redirect | null {
-  // 真站的 `/` 会重定向到 /profile_v4/index（未登录则到登录页）。假站也必须这么做 ——
-  // 少了这一跳，settleOnHome 的 waitForURL 会每次都等满超时（发现于 2026-08-16：
-  // 每个用例平白多花 15 秒），而真机上根本不会。假站不像真机，测出来的时序也是假的。
+  /**
+   * 真站的 `/` **无论登录与否都先跳 `/profile_v4/`**，未登录时再由 `/profile_v4/`
+   * 弹回登录页 —— 也就是说未登录的跳转链是三跳：`/` → `/profile_v4/` → `/auth/page/login`。
+   *
+   * 这一跳曾经被假站省掉（直接 `/` → 登录页），后果是 2026-08-17 真机上
+   * `check_login_status` 把**未登录报成已登录**：settleOnHome 的 waitForURL 在中间
+   * 那一跳就满足了「落进已知路径」，读到的 URL 是 /profile_v4/。
+   * 假站不像真机，测出来的判定也是假的 —— 这里必须照抄真机的跳转链。
+   */
   if (path === '/') {
-    return REDIRECT(ctx.state.loggedIn ? '/profile_v4/index' : '/auth/page/login');
+    return REDIRECT('/profile_v4/index');
   }
 
   if (path === '/profile_v4' || path.startsWith('/profile_v4/index')) {
-    if (!ctx.state.loggedIn) return null;
+    /**
+     * 未登录时**先把页面发下来、再由客户端弹回登录页** —— 这正是真站的行为，
+     * 也是这条链能骗过登录判定的原因：服务端 302 的话浏览器不会提交中间 URL，
+     * 客户端跳转会，于是 `page.url()` 有一瞬间就是 /profile_v4/。
+     * 用 302 复现不出真机的 bug（2026-08-17 实测：改成 302 测试照样全绿）。
+     */
+    if (!ctx.state.loggedIn) {
+      return shell(
+        'bouncing',
+        `<script>setTimeout(() => location.replace('/auth/page/login'), 300);</script>`,
+      );
+    }
     return shell(
       'dashboard',
       `<div class="sidebar"><a href="/profile_v4/graphic/publish">发布文章</a></div>
@@ -169,7 +194,7 @@ function renderPage(
 
   if (path === '/profile_v4/graphic/publish') {
     if (!ctx.state.loggedIn) return null;
-    return shell('article', articleEditor(ctx.transfer, ctx.failPublish));
+    return shell('article', articleEditor(ctx.transfer, ctx.failPublish, ctx.silent));
   }
 
   if (path === '/profile_v4/weitoutiao/publish') {
@@ -183,7 +208,14 @@ function renderPage(
 function shell(page: string, body: string): string {
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>假头条后台 · ${page}</title>
 <style>body{font-family:sans-serif;padding:16px} .editor{border:1px solid #ccc;min-height:200px;padding:8px}
-button{margin:4px;padding:6px 12px} .byte-drawer-wrapper{border:2px solid #09f;padding:8px;margin-top:8px}</style>
+button{margin:4px;padding:6px 12px} .byte-drawer-wrapper{border:2px solid #09f;padding:8px;margin-top:8px}
+/* AI 抽屉铺在整页之上：这就是真站拦住「预览并发布」的那层 */
+.ai-assistant-drawer{position:fixed;inset:0;background:rgba(0,0,0,.01);z-index:9999;margin:0}
+.ai-conversation{position:absolute;inset:0}
+/* 复选框遮罩：真站用它做自定义样式，副作用是直接点 input 会被拦截 */
+.byte-checkbox{position:relative;display:inline-block}
+.byte-checkbox input{position:absolute;opacity:0;width:16px;height:16px}
+.byte-checkbox-mask{position:absolute;left:0;top:0;width:16px;height:16px;background:#fff;border:1px solid #999}</style>
 </head><body data-page="${page}">${body}
 <script>
   window.__report = (patch) => fetch('/__state', { method: 'POST', body: JSON.stringify(patch) });
@@ -192,7 +224,7 @@ button{margin:4px;padding:6px 12px} .byte-drawer-wrapper{border:2px solid #09f;p
 }
 
 /** 文章编辑器：标题框 + 会解析 paste 的 contenteditable + 封面抽屉 + 发布三连击 */
-function articleEditor(transfer: boolean, failPublish: boolean): string {
+function articleEditor(transfer: boolean, failPublish: boolean, silent = false): string {
   return `
 <textarea placeholder="请输入文章标题（2-30个字）" id="title" rows="1" cols="60"></textarea>
 
@@ -204,7 +236,24 @@ function articleEditor(transfer: boolean, failPublish: boolean): string {
 </div>
 
 <label><input type="checkbox" id="first"> 头条首发</label>
-<label><input type="checkbox" id="also" checked> 同时发布微头条，发布得更多收益</label>
+<!--
+  真站结构：左列是行标签（点它毫无作用），复选框在右列的 label 里，
+  而且 input 被 .byte-checkbox-mask 盖住（直接点 input 会被拦截）。
+  假站以前把文字和 checkbox 塞进同一个 label —— 点文案就能切换，于是
+  「点了行标签就 return」的旧实现测试全绿，真机上复选框却始终勾着（2026-08-17）。
+-->
+<div class="pgc-edit-cell edit-cell form-tuwen_wtt_trans">
+  <div class="edit-label">同时发布微头条</div>
+  <div class="edit-input">
+    <label tabindex="0" class="byte-checkbox item-checkbox">
+      <input type="checkbox" id="also" checked>
+      <span class="byte-checkbox-wrapper">
+        <div class="byte-checkbox-mask"></div>
+        <span class="byte-checkbox-inner-text">发布得更多收益</span>
+      </span>
+    </label>
+  </div>
+</div>
 <label><input type="checkbox" class="decl" value="引用AI"> 引用AI</label>
 <label><input type="checkbox" class="decl" value="个人观点"> 个人观点，仅供参考</label>
 
@@ -215,12 +264,45 @@ function articleEditor(transfer: boolean, failPublish: boolean): string {
 </div>
 
 <button id="publish">预览并发布</button>
+
+<!--
+  真站的 AI 助手抽屉：**没有遮罩层、不是弹窗**，就是一块常驻面板，
+  但它的子树盖在「预览并发布」上拦截点击（2026-08-17 真机：Playwright 报
+  ".ai-conversation … subtree intercepts pointer events"，点击重试到超时，
+  文章一条都没发出去，而流程还报告了发布成功）。
+  假站必须复现这一层，否则「关掉它」这件事等于没测。
+-->
+<div class="byte-drawer-wrapper ai-assistant-drawer" id="aiDrawer">
+  <div class="ai-conversation in-tab-pane">AI 助手</div>
+</div>
+
 <div id="preview" style="display:none"><button id="confirmPublish">确认发布</button></div>
 <div id="toast" class="byte-message" style="display:none"></div>
 
 <script>
 const editor = document.getElementById('editor');
 const TRANSFER = ${transfer};
+
+/**
+ * 粘贴**文件**（真人 Ctrl+V 一张图就是这个形态）→ 走平台自己的上传通道。
+ * 真站上只有这条路拿得到合法的图片 uri；贴外链只是"显示出来"，发布时平台会回
+ * code 7115「图片uri非法」（2026-08-18 实测）。
+ */
+editor.addEventListener('paste', async (e) => {
+  const files = Array.from((e.clipboardData && e.clipboardData.files) || []);
+  if (files.length === 0) return; // 交给下面的 text/html 分支
+  e.preventDefault();
+  // 记进 __inline（report() 的标准字段）—— 记到别处会被后续的文本粘贴 report 覆盖掉
+  window.__inline = (window.__inline || []).concat(files.map((f) => f.name));
+  for (const f of files) {
+    const res = await fetch('/upload', { method: 'POST', body: '{}' });
+    const { url } = await res.json();
+    const img = document.createElement('img');
+    img.src = url;
+    editor.appendChild(img);
+  }
+  report();
+}, true);
 
 // ProseMirror 的关键行为：吃 paste 事件里的 text/html
 editor.addEventListener('paste', (e) => {
@@ -283,12 +365,15 @@ document.getElementById('publish').addEventListener('click', () => {
 });
 document.getElementById('confirmPublish').addEventListener('click', async () => {
   ${
-    failPublish
-      ? `const toast = document.getElementById('toast');
+    silent
+      ? // 零证据：不回接口、不跳转、不弹 toast（真机上点击被抽屉吃掉时就是这个样子）
+        `report({ publishClicked: true });`
+      : failPublish
+        ? `const toast = document.getElementById('toast');
          toast.textContent = '发布失败：内容包含敏感信息';
          toast.style.display = 'block';
          report({ publishClicked: true });`
-      : `await fetch('/mp/agw/article/publish', { method: 'POST', body: '{}' });
+        : `await fetch('/mp/agw/article/publish', { method: 'POST', body: '{}' });
          const toast = document.getElementById('toast');
          toast.textContent = '发布成功';
          toast.style.display = 'block';
