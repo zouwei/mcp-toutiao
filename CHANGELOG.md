@@ -3,6 +3,15 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 镜像与版本一一对应：`ghcr.io/<owner>/mcp-toutiao:vX.Y.Z`。
 
+## v0.1.1
+
+### 修复
+- 修复 Release 页面正文静默回落为自动生成记录的问题：v0.1.0 发布时，取 CHANGELOG 正文的逻辑写在 workflow 里一段内联的 `node -e` 脚本中，该脚本在 ESM 模式下误用了 `require`，抛错后被 `|| true` 悄悄吞掉，于是 GitHub Release 页面显示的不是 `CHANGELOG.md` 里写好的版本说明，而是 GitHub 自动生成的提交列表，流水线本身却依旧是绿的——这正是 v0.1.0 实际发布出去的样子。现在改为调用独立脚本 `scripts/changelog-section.mjs` 取正文，取不到时以非 0 退出码明确告知调用方需要回落，不再吞错误。
+- 取正文的逻辑从 workflow 内联脚本改为独立文件 `scripts/changelog-section.mjs`，可以在本地直接用 `node scripts/changelog-section.mjs <version>` 跑一遍验证，不用等 CI 才能发现问题。
+
+### 已知限制
+- 这次改动只解决了"取正文失败时会被静默吞掉"的问题；`CHANGELOG.md` 里确实没写对应版本说明的情况，依旧会按预期回落成自动生成记录，这属于设计内行为，不是 bug。
+
 ## v0.1.0
 
 ### 新增
